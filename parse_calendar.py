@@ -79,13 +79,7 @@ def parse_day_block(day_num, year, month, lines):
 
         time_match = re.search(r'(@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*until\s*pau)', line_clean, re.IGNORECASE)
         
-        has_valid_time = False
-        if time_match:
-            t_str = time_match.group(0).strip()
-            if re.search(r'am|pm|until', t_str, re.IGNORECASE) or '-' in t_str or ':' in t_str:
-                has_valid_time = True
-
-        if has_valid_time:
+        if time_match and len(time_match.group(0).strip()) > 2:
             time_str = time_match.group(0)
             line_title = re.sub(re.escape(time_str), '', line_clean, flags=re.IGNORECASE).strip()
             line_title = re.sub(r'\s+', ' ', line_title)
@@ -115,121 +109,45 @@ def extract_events(text):
     events = []
     current_year = 2026
     current_month = None
+    current_day = None
+    day_lines = []
 
-    has_table_delimiters = '\t' in text or '|' in text
-
-    if has_table_delimiters:
-        week_days = [None] * 7
-        week_buffers = [[] for _ in range(7)]
-
-        def flush_week():
-            nonlocal events, week_days, week_buffers, current_year, current_month
-            if not current_month or not current_year:
-                return
-            for col_idx in range(7):
-                day_num = week_days[col_idx]
-                lines = week_buffers[col_idx]
-                if day_num and lines:
-                    evs = parse_day_block(day_num, current_year, current_month, lines)
-                    events.extend(evs)
-            week_days = [None] * 7
-            week_buffers = [[] for _ in range(7)]
-
-        for line in text.split('\n'):
-            line_raw = line
-            line_clean = line.strip()
-            if not line_clean:
-                continue
-
-            month_found = False
-            for m_name, m_num in MONTH_MAP.items():
-                if m_name in line_clean.lower() and ("calendar" in line_clean.lower() or len(line_clean) < 25):
-                    flush_week()
-                    current_month = m_num
-                    current_year = 2027 if current_month < 6 else 2026
-                    month_found = True
-                    break
-            if month_found:
-                continue
-
-            if not current_month:
-                continue
-
-            if any(day_name in line_clean.lower() for day_name in DAYS_OF_WEEK) and len(line_clean) > 15:
-                continue
-
-            cells = line_raw.split('\t') if '\t' in line_raw else line_raw.split('|')
-
-            row_day_matches = []
-            for cell in cells:
-                cell_str = cell.strip()
-                m = re.match(r'^\s*([1-9]|[12]\d|3[01])(?!\s*[:\d]|am|pm|a\.m|p\.m)\b\s*(.*)$', cell_str, re.IGNORECASE)
-                row_day_matches.append(m)
-
-            if any(m is not None for m in row_day_matches):
-                flush_week()
-                for col_idx, cell in enumerate(cells):
-                    if col_idx >= 7:
-                        break
-                    m = row_day_matches[col_idx]
-                    if m:
-                        day_num = int(m.group(1))
-                        remainder = m.group(2).strip()
-                        week_days[col_idx] = day_num
-                        if remainder:
-                            week_buffers[col_idx].append(remainder)
-            else:
-                for col_idx, cell in enumerate(cells):
-                    if col_idx >= 7:
-                        break
-                    cell_str = cell.strip()
-                    if cell_str and week_days[col_idx] is not None:
-                        week_buffers[col_idx].append(cell_str)
-
-        flush_week()
-    else:
-        current_day = None
+    def flush_current_day():
+        nonlocal events, current_day, current_year, current_month, day_lines
+        if current_day and current_month and current_year:
+            evs = parse_day_block(current_day, current_year, current_month, day_lines)
+            events.extend(evs)
         day_lines = []
 
-        def flush_day():
-            nonlocal events, current_day, current_year, current_month, day_lines
-            if current_day and current_month and current_year and day_lines:
-                evs = parse_day_block(current_day, current_year, current_month, day_lines)
-                events.extend(evs)
-            day_lines = []
+    for line in text.split('\n'):
+        line_clean = line.strip()
+        if not line_clean:
+            continue
 
-        for line in text.split('\n'):
-            line_clean = line.strip()
-            if not line_clean:
-                continue
+        month_found = False
+        for m_name, m_num in MONTH_MAP.items():
+            if m_name in line_clean.lower() and ("calendar" in line_clean.lower() or len(line_clean) < 25):
+                flush_current_day()
+                current_month = m_num
+                current_year = 2027 if current_month < 6 else 2026
+                current_day = None
+                month_found = True
+                break
+        if month_found:
+            continue
 
-            month_found = False
-            for m_name, m_num in MONTH_MAP.items():
-                if m_name in line_clean.lower() and ("calendar" in line_clean.lower() or len(line_clean) < 25):
-                    flush_day()
-                    current_month = m_num
-                    current_year = 2027 if current_month < 6 else 2026
-                    current_day = None
-                    month_found = True
-                    break
-            if month_found:
-                continue
-
-            if not current_month:
-                continue
-
-            m = re.match(r'^\s*([1-9]|[12]\d|3[01])(?!\s*[:\d]|am|pm|a\.m|p\.m)\b\s*(.*)$', line_clean, re.IGNORECASE)
-            if m:
-                flush_day()
-                current_day = int(m.group(1))
-                remainder = m.group(2).strip()
+        if current_month:
+            day_match = re.match(r'^\s*([1-9]|[12]\d|3[01])(?!\s*[:\d]|am|pm|a\.m|p\.m)\b\s*(.*)$', line_clean, re.IGNORECASE)
+            if day_match:
+                flush_current_day()
+                current_day = int(day_match.group(1))
+                remainder = day_match.group(2).strip()
                 if remainder:
                     day_lines.append(remainder)
             elif current_day is not None:
                 day_lines.append(line_clean)
 
-        flush_day()
-
+    flush_current_day()
     return events
 
 def create_ics(events, filename="calendar.ics"):
