@@ -15,9 +15,12 @@ MONTH_MAP = {
 }
 
 def fetch_text():
-    res = requests.get(EXPORT_URL)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    res = requests.get(EXPORT_URL, headers=headers)
     if res.status_code != 200:
-        raise Exception(f"Failed to fetch doc: {res.status_code}")
+        raise Exception(f"Failed to fetch doc: HTTP {res.status_code}")
     return res.text
 
 def parse_single_time(t_str, base_date):
@@ -39,7 +42,10 @@ def parse_time_range(time_str, base_date):
             start_raw += f" {re.search(r'am|pm', end_raw).group()}"
         s_dt = parse_single_time(start_raw, base_date)
         e_dt = parse_single_time(end_raw, base_date)
-        return s_dt, e_dt
+        if s_dt and e_dt:
+            return s_dt, e_dt
+        elif s_dt:
+            return s_dt, s_dt + timedelta(hours=1)
     s_dt = parse_single_time(time_str, base_date)
     if s_dt:
         return s_dt, s_dt + timedelta(hours=1)
