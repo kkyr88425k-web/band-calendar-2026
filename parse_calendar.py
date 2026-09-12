@@ -15,7 +15,7 @@ MONTH_MAP = {
 }
 
 DAYS_OF_WEEK = {"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}
-EVENT_KEYWORDS = {"rehearsal", "camp", "game", "vs", "concert", "workshop", "parade", "audition", "line", "guard", "drumline"}
+EVENT_KEYWORDS = {"rehearsal", "camp", "game", "vs", "concert", "workshop", "parade", "audition", "line", "guard", "drumline", "marching"}
 
 def fetch_text():
     headers = {
@@ -28,19 +28,25 @@ def fetch_text():
 
 def detect_month_and_year(line_clean):
     lower_line = line_clean.lower()
+    
+    # Skip event lines containing event keywords or "marching"
     if any(kw in lower_line for kw in EVENT_KEYWORDS):
         return None, None
         
     for m_name, m_num in MONTH_MAP.items():
         pattern = r'\b' + re.escape(m_name) + r'\b'
         if re.search(pattern, lower_line):
-            if "calendar" in lower_line or len(line_clean) < 35 or re.search(r'\b202[5-9]\b', lower_line):
-                year_match = re.search(r'\b(202[5-9])\b', lower_line)
+            year_match = re.search(r'\b(202[5-9])\b', lower_line)
+            has_calendar = "calendar" in lower_line
+            
+            # Require an explicit year (2025-2029) or "calendar" to qualify as a month header
+            if year_match or has_calendar:
                 if year_match:
                     year = int(year_match.group(1))
                 else:
                     year = 2027 if m_num < 6 else 2026
                 return m_num, year
+
     return None, None
 
 def parse_single_time(t_str, base_date):
@@ -250,13 +256,23 @@ def create_ics(events, filename="calendar.ics"):
         "CALSCALE:GREGORIAN",
         "X-WR-TIMEZONE:Pacific/Honolulu"
     ]
-    for idx, evt in enumerate(events):
+    seen_uids = set()
+    for evt in events:
+        summary_slug = re.sub(r'[^a-zA-Z0-9]', '', evt['summary'].lower())[:30]
         if evt.get("all_day"):
             dt_s = evt["start"].strftime("%Y%m%d")
             dt_e = evt["end"].strftime("%Y%m%d")
+            uid = f"band-{dt_s}-{summary_slug}@kamehamehaband"
+            dedup_counter = 1
+            base_uid = uid
+            while uid in seen_uids:
+                uid = f"{base_uid}-{dedup_counter}"
+                dedup_counter += 1
+            seen_uids.add(uid)
+
             ics_lines.extend([
                 "BEGIN:VEVENT",
-                f"UID:band-event-{idx}-{dt_s}@kamehamehaband",
+                f"UID:{uid}",
                 f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
                 f"VALUE=DATE;DTSTART:{dt_s}",
                 f"VALUE=DATE;DTEND:{dt_e}",
@@ -266,9 +282,17 @@ def create_ics(events, filename="calendar.ics"):
         else:
             dt_s = evt["start"].strftime("%Y%m%dT%H%M%S")
             dt_e = evt["end"].strftime("%Y%m%dT%H%M%S")
+            uid = f"band-{dt_s}-{summary_slug}@kamehamehaband"
+            dedup_counter = 1
+            base_uid = uid
+            while uid in seen_uids:
+                uid = f"{base_uid}-{dedup_counter}"
+                dedup_counter += 1
+            seen_uids.add(uid)
+
             ics_lines.extend([
                 "BEGIN:VEVENT",
-                f"UID:band-event-{idx}-{dt_s}@kamehamehaband",
+                f"UID:{uid}",
                 f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
                 f"DTSTART;TZID=Pacific/Honolulu:{dt_s}",
                 f"DTEND;TZID=Pacific/Honolulu:{dt_e}",
