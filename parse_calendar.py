@@ -45,14 +45,50 @@ def parse_time_range(time_str, base_date):
         return s_dt, s_dt + timedelta(hours=1)
     return base_date, base_date + timedelta(hours=1)
 
+def process_cell(cell_text, current_year, current_month, events):
+    cell_text = cell_text.strip()
+    if not cell_text:
+        return
+
+    # Match day number ONLY if it appears at the exact start of the cell
+    day_match = re.match(r'^(\d{1,2})\b(.*)', cell_text, re.DOTALL)
+    if not day_match:
+        return
+
+    day_num = int(day_match.group(1))
+    content = day_match.group(2).strip()
+
+    if day_num < 1 or day_num > 31 or not content:
+        return
+
+    try:
+        event_date = datetime(current_year, current_month, day_num)
+    except ValueError:
+        return
+
+    # Extract times and titles cleanly
+    times_found = re.findall(r'(@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?)', content, re.IGNORECASE)
+    title = re.sub(r'@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?', '', content, flags=re.IGNORECASE).strip()
+    title = re.sub(r'\s+', ' ', title)
+
+    if title and len(title) > 2:
+        if times_found and len(times_found[0].strip()) > 2:
+            s_dt, e_dt = parse_time_range(times_found[0], event_date)
+        else:
+            s_dt = event_date
+            e_dt = event_date + timedelta(hours=1)
+        events.append({"summary": title, "start": s_dt, "end": e_dt})
+
 def extract_events(text):
     events = []
     current_year = 2026
     current_month = None
+
     for line in text.split('\n'):
         line_clean = line.strip()
         if not line_clean:
             continue
+
         month_found = False
         for m_name, m_num in MONTH_MAP.items():
             if m_name in line_clean.lower() and "calendar" in line_clean.lower():
@@ -62,26 +98,19 @@ def extract_events(text):
                 break
         if month_found:
             continue
+
         if current_month:
-            for match in re.finditer(r'(\b\d{1,2}\b)\s*([^\d|]+)', line_clean):
-                day_num = int(match.group(1))
-                cell_text = match.group(2).strip()
-                if day_num < 1 or day_num > 31 or not cell_text:
-                    continue
-                try:
-                    event_date = datetime(current_year, current_month, day_num)
-                except ValueError:
-                    continue
-                times_found = re.findall(r'(@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?)', cell_text, re.IGNORECASE)
-                title = re.sub(r'@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?', '', cell_text, flags=re.IGNORECASE).strip()
-                title = re.sub(r'\s+', ' ', title)
-                if title and len(title) > 2:
-                    if times_found and len(times_found[0].strip()) > 2:
-                        s_dt, e_dt = parse_time_range(times_found[0], event_date)
-                    else:
-                        s_dt = event_date
-                        e_dt = event_date + timedelta(hours=1)
-                    events.append({"summary": title, "start": s_dt, "end": e_dt})
+            # Split cells by table delimiters (| or tabs)
+            if '|' in line_clean:
+                cells = line_clean.split('|')
+            elif '\t' in line_clean:
+                cells = line_clean.split('\t')
+            else:
+                cells = [line_clean]
+
+            for cell in cells:
+                process_cell(cell, current_year, current_month, events)
+
     return events
 
 def create_ics(events, filename="calendar.ics"):
