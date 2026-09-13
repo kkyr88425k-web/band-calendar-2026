@@ -48,6 +48,10 @@ def parse_time_range(time_str, base_date):
             return p1, p1 + timedelta(hours=2)
     return base_date + timedelta(hours=12), base_date + timedelta(hours=14)
 
+def sanitize_summary(text):
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+
 def process_cell_lines(lines, base_date):
     events = []
     curr_summary_parts = []
@@ -58,8 +62,7 @@ def process_cell_lines(lines, base_date):
         if not curr_summary_parts and not curr_time_str:
             return
         
-        summary = " ".join(curr_summary_parts).strip()
-        summary = re.sub(r'\s+', ' ', summary) or "Band Event"
+        summary = sanitize_summary(" ".join(curr_summary_parts)) or "Band Event"
 
         if curr_time_str:
             s_dt, e_dt = parse_time_range(curr_time_str, base_date)
@@ -70,27 +73,22 @@ def process_cell_lines(lines, base_date):
         curr_summary_parts = []
         curr_time_str = None
 
-    for line in lines[1:]:  # Skip day number
+    for line in lines[1:]:
         time_match = re.search(TIME_REGEX, line, re.IGNORECASE)
-        
         if time_match:
             matched_time = time_match.group(0)
             line_text_remaining = line.replace(matched_time, "").strip()
-            
             if curr_time_str:
                 finalize_current()
-                
             curr_time_str = matched_time
             if line_text_remaining:
                 curr_summary_parts.append(line_text_remaining)
         else:
-            if curr_time_str:
-                if line.startswith("@"):
-                    curr_summary_parts.append(line)
-                else:
-                    finalize_current()
-                    curr_summary_parts.append(line)
+            if curr_time_str and line.startswith("@"):
+                curr_summary_parts.append(line)
             else:
+                if curr_time_str:
+                    finalize_current()
                 curr_summary_parts.append(line)
 
     finalize_current()
@@ -104,7 +102,6 @@ def extract_events(html):
 
     for el in soup.find('body').find_all(['p', 'h1', 'h2', 'h3', 'table', 'span']):
         text = el.get_text(separator=" ").strip().lower()
-        
         if el.name != 'table':
             for m_name, m_num in MONTH_MAP.items():
                 if m_name in text and len(text) < 30:
@@ -117,12 +114,10 @@ def extract_events(html):
                 cells = row.find_all('td')
                 if len(cells) < 7:
                     continue
-                    
                 for cell in cells:
                     cell_text = cell.get_text(separator="\n").strip()
                     if not cell_text:
                         continue
-                        
                     lines = [line.strip() for line in cell_text.split('\n') if line.strip()]
                     match = re.match(r'^(\d{1,2})$', lines[0])
                     if match:
@@ -131,10 +126,7 @@ def extract_events(html):
                             base_date = datetime(current_year, current_month, day_num)
                         except ValueError:
                             continue
-                            
-                        cell_events = process_cell_lines(lines, base_date)
-                        events.extend(cell_events)
-
+                        events.extend(process_cell_lines(lines, base_date))
     return events
 
 def create_ics(events, filename="calendar.ics"):
@@ -148,8 +140,10 @@ def create_ics(events, filename="calendar.ics"):
         "X-WR-TIMEZONE:Pacific/Honolulu"
     ]
     
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    
     for idx, evt in enumerate(events):
-        summary_slug = re.sub(r'[^a-zA-Z0-9]', '', evt['summary'].lower())[:20] or "event"
+        summary_slug = re.sub(r'[^a-zA-Z0-9]', '', evt['summary'].lower())[:15] or "event"
         
         if evt.get("all_day"):
             dt_s = evt["start"].strftime("%Y%m%d")
@@ -159,13 +153,14 @@ def create_ics(events, filename="calendar.ics"):
             ics_lines.extend([
                 "BEGIN:VEVENT",
                 f"UID:{uid}",
-                f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
+                f"DTSTAMP:{timestamp}",
                 f"DTSTART;VALUE=DATE:{dt_s}",
                 f"DTEND;VALUE=DATE:{dt_e}",
                 f"SUMMARY:{evt['summary']}",
                 "END:VEVENT"
             ])
         else:
+            # HST to UTC (+10 hours) conversion
             utc_start = evt["start"] + timedelta(hours=10)
             utc_end = evt["end"] + timedelta(hours=10)
             
@@ -176,7 +171,7 @@ def create_ics(events, filename="calendar.ics"):
             ics_lines.extend([
                 "BEGIN:VEVENT",
                 f"UID:{uid}",
-                f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
+                f"DTSTAMP:{timestamp}",
                 f"DTSTART:{dt_s}",
                 f"DTEND:{dt_e}",
                 f"SUMMARY:{evt['summary']}",
