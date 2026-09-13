@@ -20,8 +20,11 @@ def fetch_html():
         raise Exception("Failed to fetch document.")
     return res.text
 
-def parse_time(t_str, base_date):
+def parse_single_time(t_str, base_date, force_pm=False):
     clean_t = t_str.lower().replace("@", "").strip()
+    if force_pm and "am" not in clean_t and "pm" not in clean_t:
+        clean_t += "pm"
+        
     for fmt in ("%I:%M %p", "%I:%M%p", "%I %p", "%I%p", "%H:%M"):
         try:
             pt = datetime.strptime(clean_t, fmt).time()
@@ -32,20 +35,32 @@ def parse_time(t_str, base_date):
 
 def parse_time_range(time_str, base_date):
     clean_str = time_str.lower().replace("@", "").strip()
+    
     if "-" in clean_str or "–" in clean_str:
         parts = re.split(r'[-–]', clean_str)
-        p1 = parse_time(parts[0], base_date)
-        p2 = parse_time(parts[1], base_date)
+        p1_str, p2_str = parts[0].strip(), parts[1].strip()
+        
+        p2_has_pm = "pm" in p2_str
+        p1_has_pm = "pm" in p1_str
+        
+        # Inherit PM if time range implies evening (e.g., 5:30 - 7:30pm)
+        p1 = parse_single_time(p1_str, base_date, force_pm=p2_has_pm)
+        p2 = parse_single_time(p2_str, base_date, force_pm=p1_has_pm or p2_has_pm)
+        
         if p1 and p2:
+            if p2 <= p1:
+                p2 += timedelta(hours=12)
             return p1, p2
+            
     elif "until pau" in clean_str:
-        p1 = parse_time(clean_str.replace("until pau", ""), base_date)
+        p1 = parse_single_time(clean_str.replace("until pau", ""), base_date, force_pm=True)
         if p1:
             return p1, p1 + timedelta(hours=3)
     else:
-        p1 = parse_time(clean_str, base_date)
+        p1 = parse_single_time(clean_str, base_date, force_pm=True)
         if p1:
             return p1, p1 + timedelta(hours=2)
+            
     return base_date + timedelta(hours=12), base_date + timedelta(hours=14)
 
 def sanitize_summary(text):
@@ -97,36 +112,47 @@ def process_cell_lines(lines, base_date):
 def extract_events(html):
     soup = BeautifulSoup(html, 'html.parser')
     events = []
-    current_month = None
-    current_year = None
-
-    for el in soup.find('body').find_all(['p', 'h1', 'h2', 'h3', 'table', 'span']):
-        text = el.get_text(separator=" ").strip().lower()
-        if el.name != 'table':
-            for m_name, m_num in MONTH_MAP.items():
-                if m_name in text and len(text) < 30:
-                    current_month = m_num
-                    current_year = 2026 if m_num >= 6 else 2027
-            continue
+    
+    tables = soup.find_all('table')
+    for table in tables:
+        # Detect month title from table text or immediate preceding elements
+        table_text = table.get_text(separator=" ").lower()
+        prev_text = ""
+        prev_node = table.find_previous_sibling()
+        if prev_node:
+            prev_text = prev_node.get_text(separator=" ").lower()
             
-        if el.name == 'table' and current_month and current_year:
-            for row in el.find_all('tr'):
-                cells = row.find_all('td')
-                if len(cells) < 7:
+        combined_context = prev_text + " " + table_text[:200]
+        
+        table_month = None
+        table_year = None
+        for m_name, m_num in MONTH_MAP.items():
+            if m_name in combined_context:
+                table_month = m_num
+                table_year = 2026 if m_num >= 6 else 2027
+                break
+                
+        if not table_month:
+            continue
+
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
+            if len(cells) < 7:
+                continue
+            for cell in cells:
+                cell_text = cell.get_text(separator="\n").strip()
+                if not cell_text:
                     continue
-                for cell in cells:
-                    cell_text = cell.get_text(separator="\n").strip()
-                    if not cell_text:
+                lines = [line.strip() for line in cell_text.split('\n') if line.strip()]
+                match = re.match(r'^(\d{1,2})$', lines[0])
+                if match:
+                    day_num = int(match.group(1))
+                    try:
+                        base_date = datetime(table_year, table_month, day_num)
+                    except ValueError:
                         continue
-                    lines = [line.strip() for line in cell_text.split('\n') if line.strip()]
-                    match = re.match(r'^(\d{1,2})$', lines[0])
-                    if match:
-                        day_num = int(match.group(1))
-                        try:
-                            base_date = datetime(current_year, current_month, day_num)
-                        except ValueError:
-                            continue
-                        events.extend(process_cell_lines(lines, base_date))
+                    events.extend(process_cell_lines(lines, base_date))
+                    
     return events
 
 def create_ics(events, filename="calendar.ics"):
