@@ -29,7 +29,6 @@ def fetch_text():
 def detect_month_and_year(line_clean):
     lower_line = line_clean.lower()
     
-    # Skip event lines containing event keywords or "marching"
     if any(kw in lower_line for kw in EVENT_KEYWORDS):
         return None, None
         
@@ -39,7 +38,6 @@ def detect_month_and_year(line_clean):
             year_match = re.search(r'\b(202[5-9])\b', lower_line)
             has_calendar = "calendar" in lower_line
             
-            # Require an explicit year (2025-2029) or "calendar" to qualify as a month header
             if year_match or has_calendar:
                 if year_match:
                     year = int(year_match.group(1))
