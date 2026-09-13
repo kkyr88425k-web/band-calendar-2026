@@ -29,7 +29,6 @@ def fetch_text():
 def detect_month_and_year(line_clean):
     lower_line = line_clean.lower()
     
-    # Skip event lines containing event keywords or "marching"
     if any(kw in lower_line for kw in EVENT_KEYWORDS):
         return None, None
         
@@ -39,7 +38,6 @@ def detect_month_and_year(line_clean):
             year_match = re.search(r'\b(202[5-9])\b', lower_line)
             has_calendar = "calendar" in lower_line
             
-            # Require an explicit year (2025-2029) or "calendar" to qualify as a month header
             if year_match or has_calendar:
                 if year_match:
                     year = int(year_match.group(1))
@@ -259,6 +257,9 @@ def create_ics(events, filename="calendar.ics"):
     seen_uids = set()
     for evt in events:
         summary_slug = re.sub(r'[^a-zA-Z0-9]', '', evt['summary'].lower())[:30]
+        if not summary_slug:
+            summary_slug = "event"
+            
         if evt.get("all_day"):
             dt_s = evt["start"].strftime("%Y%m%d")
             dt_e = evt["end"].strftime("%Y%m%d")
@@ -274,8 +275,8 @@ def create_ics(events, filename="calendar.ics"):
                 "BEGIN:VEVENT",
                 f"UID:{uid}",
                 f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
-                f"VALUE=DATE;DTSTART:{dt_s}",
-                f"VALUE=DATE;DTEND:{dt_e}",
+                f"DTSTART;VALUE=DATE:{dt_s}",
+                f"DTEND;VALUE=DATE:{dt_e}",
                 f"SUMMARY:{evt['summary']}",
                 "END:VEVENT"
             ])
