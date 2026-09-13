@@ -12,7 +12,8 @@ MONTH_MAP = {
     "march": 3, "april": 4, "may": 5
 }
 
-TIME_REGEX = r'(@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*[-–]\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*until\s*pau)'
+# Strictly require explicit time formats (colon or am/pm) to avoid matching "Quarter 2"
+STRICT_TIME_REGEX = r'(\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b(?:\s*[-–]\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\s*until\s*pau)?|\b\d{1,2}:\d{2}\b(?:\s*[-–]\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?)'
 
 def fetch_html():
     res = requests.get(EXPORT_URL)
@@ -43,9 +44,8 @@ def parse_time_range(time_str, base_date):
         p2_has_pm = "pm" in p2_str
         p1_has_pm = "pm" in p1_str
         
-        # Inherit PM if time range implies evening (e.g., 5:30 - 7:30pm)
-        p1 = parse_single_time(p1_str, base_date, force_pm=p2_has_pm)
-        p2 = parse_single_time(p2_str, base_date, force_pm=p1_has_pm or p2_has_pm)
+        p1 = parse_single_time(p1_str, base_date, force_pm=(p2_has_pm or not p1_has_pm))
+        p2 = parse_single_time(p2_str, base_date, force_pm=(p1_has_pm or p2_has_pm))
         
         if p1 and p2:
             if p2 <= p1:
@@ -67,46 +67,40 @@ def sanitize_summary(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
 
-def process_cell_lines(lines, base_date):
+def process_cell(cell_text, base_date):
+    # Collapse wrapped lines within the cell into unified text
+    lines = [l.strip() for l in cell_text.split('\n') if l.strip()]
+    if not lines or not re.match(r'^\d{1,2}$', lines[0]):
+        return []
+
     events = []
-    curr_summary_parts = []
-    curr_time_str = None
+    full_text = " ".join(lines[1:])
+    
+    # Split multiple events inside a single cell by time headers
+    matches = list(re.finditer(STRICT_TIME_REGEX, full_text, re.IGNORECASE))
+    
+    if not matches:
+        if full_text:
+            events.append({
+                "summary": sanitize_summary(full_text),
+                "start": base_date,
+                "end": base_date + timedelta(days=1),
+                "all_day": True
+            })
+        return events
 
-    def finalize_current():
-        nonlocal curr_summary_parts, curr_time_str
-        if not curr_summary_parts and not curr_time_str:
-            return
+    for i, match in enumerate(matches):
+        time_str = match.group(0)
+        start_idx = match.start()
+        end_idx = matches[i+1].start() if i + 1 < len(matches) else len(full_text)
         
-        summary = sanitize_summary(" ".join(curr_summary_parts)) or "Band Event"
-
-        if curr_time_str:
-            s_dt, e_dt = parse_time_range(curr_time_str, base_date)
-            events.append({"summary": summary, "start": s_dt, "end": e_dt, "all_day": False})
-        else:
-            events.append({"summary": summary, "start": base_date, "end": base_date + timedelta(days=1), "all_day": True})
+        # Extract surrounding text as summary
+        summary_text = (full_text[:start_idx] if i == 0 else "") + full_text[match.end():end_idx]
+        summary = sanitize_summary(summary_text) or "Band Event"
         
-        curr_summary_parts = []
-        curr_time_str = None
+        s_dt, e_dt = parse_time_range(time_str, base_date)
+        events.append({"summary": summary, "start": s_dt, "end": e_dt, "all_day": False})
 
-    for line in lines[1:]:
-        time_match = re.search(TIME_REGEX, line, re.IGNORECASE)
-        if time_match:
-            matched_time = time_match.group(0)
-            line_text_remaining = line.replace(matched_time, "").strip()
-            if curr_time_str:
-                finalize_current()
-            curr_time_str = matched_time
-            if line_text_remaining:
-                curr_summary_parts.append(line_text_remaining)
-        else:
-            if curr_time_str and line.startswith("@"):
-                curr_summary_parts.append(line)
-            else:
-                if curr_time_str:
-                    finalize_current()
-                curr_summary_parts.append(line)
-
-    finalize_current()
     return events
 
 def extract_events(html):
@@ -115,19 +109,22 @@ def extract_events(html):
     
     tables = soup.find_all('table')
     for table in tables:
-        # Detect month title from table text or immediate preceding elements
-        table_text = table.get_text(separator=" ").lower()
-        prev_text = ""
-        prev_node = table.find_previous_sibling()
-        if prev_node:
-            prev_text = prev_node.get_text(separator=" ").lower()
-            
-        combined_context = prev_text + " " + table_text[:200]
+        # Search backwards up to 5 elements or check full table context for Hawaiian/English month names
+        context_nodes = []
+        curr = table
+        for _ in range(5):
+            curr = curr.find_previous()
+            if curr:
+                context_nodes.append(curr.get_text(separator=" "))
+            else:
+                break
+                
+        search_text = (" ".join(context_nodes) + " " + table.get_text(separator=" ")).lower()
         
         table_month = None
         table_year = None
         for m_name, m_num in MONTH_MAP.items():
-            if m_name in combined_context:
+            if m_name in search_text:
                 table_month = m_num
                 table_year = 2026 if m_num >= 6 else 2027
                 break
@@ -141,74 +138,7 @@ def extract_events(html):
                 continue
             for cell in cells:
                 cell_text = cell.get_text(separator="\n").strip()
-                if not cell_text:
-                    continue
-                lines = [line.strip() for line in cell_text.split('\n') if line.strip()]
-                match = re.match(r'^(\d{1,2})$', lines[0])
-                if match:
-                    day_num = int(match.group(1))
-                    try:
-                        base_date = datetime(table_year, table_month, day_num)
-                    except ValueError:
-                        continue
-                    events.extend(process_cell_lines(lines, base_date))
-                    
+                if cell_text:
+                    events.extend(process_cell(cell_text, base_date=datetime(table_year, table_month, int(re.match(r'^\d{1,2}', cell_text).group(0))) if re.match(r'^\d{1,2}', cell_text) else None)) if re.match(r'^\d{1,2}', cell_text) else None
+
     return events
-
-def create_ics(events, filename="calendar.ics"):
-    ics_lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//Kamehameha Band//EN",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-        "X-WR-CALNAME:Kamehameha Band Program",
-        "X-WR-TIMEZONE:Pacific/Honolulu"
-    ]
-    
-    timestamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
-    
-    for idx, evt in enumerate(events):
-        summary_slug = re.sub(r'[^a-zA-Z0-9]', '', evt['summary'].lower())[:15] or "event"
-        
-        if evt.get("all_day"):
-            dt_s = evt["start"].strftime("%Y%m%d")
-            dt_e = evt["end"].strftime("%Y%m%d")
-            uid = f"band-{dt_s}-{summary_slug}-{idx}@kamehamehaband"
-
-            ics_lines.extend([
-                "BEGIN:VEVENT",
-                f"UID:{uid}",
-                f"DTSTAMP:{timestamp}",
-                f"DTSTART;VALUE=DATE:{dt_s}",
-                f"DTEND;VALUE=DATE:{dt_e}",
-                f"SUMMARY:{evt['summary']}",
-                "END:VEVENT"
-            ])
-        else:
-            # HST to UTC (+10 hours) conversion
-            utc_start = evt["start"] + timedelta(hours=10)
-            utc_end = evt["end"] + timedelta(hours=10)
-            
-            dt_s = utc_start.strftime("%Y%m%dT%H%M%SZ")
-            dt_e = utc_end.strftime("%Y%m%dT%H%M%SZ")
-            uid = f"band-{dt_s}-{summary_slug}-{idx}@kamehamehaband"
-
-            ics_lines.extend([
-                "BEGIN:VEVENT",
-                f"UID:{uid}",
-                f"DTSTAMP:{timestamp}",
-                f"DTSTART:{dt_s}",
-                f"DTEND:{dt_e}",
-                f"SUMMARY:{evt['summary']}",
-                "END:VEVENT"
-            ])
-            
-    ics_lines.append("END:VCALENDAR")
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write("\r\n".join(ics_lines))
-
-if __name__ == "__main__":
-    html_data = fetch_html()
-    parsed_events = extract_events(html_data)
-    create_ics(parsed_events)
