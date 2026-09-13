@@ -12,21 +12,89 @@ MONTH_MAP = {
     "march": 3, "april": 4, "may": 5
 }
 
+TIME_REGEX = r'(@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*[-–]\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*until\s*pau)'
+
 def fetch_html():
     res = requests.get(EXPORT_URL)
     if res.status_code != 200:
-        raise Exception("Failed to fetch doc.")
+        raise Exception("Failed to fetch document.")
     return res.text
 
 def parse_time(t_str, base_date):
-    t_str = t_str.lower().replace("@", "").strip()
+    clean_t = t_str.lower().replace("@", "").strip()
     for fmt in ("%I:%M %p", "%I:%M%p", "%I %p", "%I%p", "%H:%M"):
         try:
-            pt = datetime.strptime(t_str, fmt).time()
+            pt = datetime.strptime(clean_t, fmt).time()
             return datetime.combine(base_date.date(), pt)
         except ValueError:
             continue
     return None
+
+def parse_time_range(time_str, base_date):
+    clean_str = time_str.lower().replace("@", "").strip()
+    if "-" in clean_str or "–" in clean_str:
+        parts = re.split(r'[-–]', clean_str)
+        p1 = parse_time(parts[0], base_date)
+        p2 = parse_time(parts[1], base_date)
+        if p1 and p2:
+            return p1, p2
+    elif "until pau" in clean_str:
+        p1 = parse_time(clean_str.replace("until pau", ""), base_date)
+        if p1:
+            return p1, p1 + timedelta(hours=3)
+    else:
+        p1 = parse_time(clean_str, base_date)
+        if p1:
+            return p1, p1 + timedelta(hours=2)
+    return base_date + timedelta(hours=12), base_date + timedelta(hours=14)
+
+def process_cell_lines(lines, base_date):
+    events = []
+    curr_summary_parts = []
+    curr_time_str = None
+
+    def finalize_current():
+        nonlocal curr_summary_parts, curr_time_str
+        if not curr_summary_parts and not curr_time_str:
+            return
+        
+        summary = " ".join(curr_summary_parts).strip()
+        summary = re.sub(r'\s+', ' ', summary) or "Band Event"
+
+        if curr_time_str:
+            s_dt, e_dt = parse_time_range(curr_time_str, base_date)
+            events.append({"summary": summary, "start": s_dt, "end": e_dt, "all_day": False})
+        else:
+            events.append({"summary": summary, "start": base_date, "end": base_date + timedelta(days=1), "all_day": True})
+        
+        curr_summary_parts = []
+        curr_time_str = None
+
+    for line in lines[1:]:  # Skip day number
+        time_match = re.search(TIME_REGEX, line, re.IGNORECASE)
+        
+        if time_match:
+            matched_time = time_match.group(0)
+            line_text_remaining = line.replace(matched_time, "").strip()
+            
+            if curr_time_str:
+                finalize_current()
+                
+            curr_time_str = matched_time
+            if line_text_remaining:
+                curr_summary_parts.append(line_text_remaining)
+        else:
+            if curr_time_str:
+                if line.startswith("@"):
+                    curr_summary_parts.append(line)
+                else:
+                    finalize_current()
+                    curr_summary_parts.append(line)
+            else:
+                curr_summary_parts.append(line)
+
+    finalize_current()
+    return events
 
 def extract_events(html):
     soup = BeautifulSoup(html, 'html.parser')
@@ -34,25 +102,21 @@ def extract_events(html):
     current_month = None
     current_year = None
 
-    # Scan through document elements
     for el in soup.find('body').find_all(['p', 'h1', 'h2', 'h3', 'table', 'span']):
         text = el.get_text(separator=" ").strip().lower()
         
-        # Detect Month context
         if el.name != 'table':
             for m_name, m_num in MONTH_MAP.items():
                 if m_name in text and len(text) < 30:
                     current_month = m_num
-                    # Fall months are 2026, Spring months are 2027
                     current_year = 2026 if m_num >= 6 else 2027
             continue
             
-        # Parse Table if we have a known month
         if el.name == 'table' and current_month and current_year:
             for row in el.find_all('tr'):
                 cells = row.find_all('td')
                 if len(cells) < 7:
-                    continue # Skip non-calendar rows
+                    continue
                     
                 for cell in cells:
                     cell_text = cell.get_text(separator="\n").strip()
@@ -60,8 +124,6 @@ def extract_events(html):
                         continue
                         
                     lines = [line.strip() for line in cell_text.split('\n') if line.strip()]
-                    
-                    # Check if cell starts with a day number
                     match = re.match(r'^(\d{1,2})$', lines[0])
                     if match:
                         day_num = int(match.group(1))
@@ -70,43 +132,8 @@ def extract_events(html):
                         except ValueError:
                             continue
                             
-                        # If there is event text after the day number
-                        if len(lines) > 1:
-                            event_text = " ".join(lines[1:])
-                            
-                            # Extract Time blocks
-                            time_match = re.search(r'(@?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*until\s*pau)', event_text, re.IGNORECASE)
-                            
-                            if time_match:
-                                time_str = time_match.group(0)
-                                summary = event_text.replace(time_str, "").strip()
-                                summary = re.sub(r'\s+', ' ', summary)
-                                
-                                # Simple fallback time parsing
-                                s_dt = base_date + timedelta(hours=12)
-                                e_dt = base_date + timedelta(hours=14)
-                                
-                                if "-" in time_str:
-                                    parts = time_str.split("-")
-                                    p1 = parse_time(parts[0], base_date)
-                                    p2 = parse_time(parts[1], base_date)
-                                    if p1 and p2:
-                                        s_dt, e_dt = p1, p2
-                                elif "until pau" in time_str.lower():
-                                    p1 = parse_time(time_str.replace("until pau", ""), base_date)
-                                    if p1:
-                                        s_dt = p1
-                                        e_dt = p1 + timedelta(hours=3)
-                                else:
-                                    p1 = parse_time(time_str, base_date)
-                                    if p1:
-                                        s_dt = p1
-                                        e_dt = p1 + timedelta(hours=2)
-                                        
-                                events.append({"summary": summary or "Band Event", "start": s_dt, "end": e_dt, "all_day": False})
-                            else:
-                                # All-day event
-                                events.append({"summary": event_text, "start": base_date, "end": base_date + timedelta(days=1), "all_day": True})
+                        cell_events = process_cell_lines(lines, base_date)
+                        events.extend(cell_events)
 
     return events
 
@@ -116,21 +143,18 @@ def create_ics(events, filename="calendar.ics"):
         "VERSION:2.0",
         "PRODID:-//Kamehameha Band//EN",
         "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "X-WR-CALNAME:Kamehameha Band Program",
         "X-WR-TIMEZONE:Pacific/Honolulu"
     ]
     
-    seen_uids = set()
-    for evt in events:
-        summary_slug = re.sub(r'[^a-zA-Z0-9]', '', evt['summary'].lower())[:25] or "event"
+    for idx, evt in enumerate(events):
+        summary_slug = re.sub(r'[^a-zA-Z0-9]', '', evt['summary'].lower())[:20] or "event"
         
         if evt.get("all_day"):
             dt_s = evt["start"].strftime("%Y%m%d")
             dt_e = evt["end"].strftime("%Y%m%d")
-            uid = f"band-{dt_s}-{summary_slug}@kamehamehaband"
-            
-            while uid in seen_uids:
-                uid += "-1"
-            seen_uids.add(uid)
+            uid = f"band-{dt_s}-{summary_slug}-{idx}@kamehamehaband"
 
             ics_lines.extend([
                 "BEGIN:VEVENT",
@@ -142,20 +166,19 @@ def create_ics(events, filename="calendar.ics"):
                 "END:VEVENT"
             ])
         else:
-            dt_s = evt["start"].strftime("%Y%m%dT%H%M%S")
-            dt_e = evt["end"].strftime("%Y%m%dT%H%M%S")
-            uid = f"band-{dt_s}-{summary_slug}@kamehamehaband"
+            utc_start = evt["start"] + timedelta(hours=10)
+            utc_end = evt["end"] + timedelta(hours=10)
             
-            while uid in seen_uids:
-                uid += "-1"
-            seen_uids.add(uid)
+            dt_s = utc_start.strftime("%Y%m%dT%H%M%SZ")
+            dt_e = utc_end.strftime("%Y%m%dT%H%M%SZ")
+            uid = f"band-{dt_s}-{summary_slug}-{idx}@kamehamehaband"
 
             ics_lines.extend([
                 "BEGIN:VEVENT",
                 f"UID:{uid}",
                 f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
-                f"DTSTART;TZID=Pacific/Honolulu:{dt_s}",
-                f"DTEND;TZID=Pacific/Honolulu:{dt_e}",
+                f"DTSTART:{dt_s}",
+                f"DTEND:{dt_e}",
                 f"SUMMARY:{evt['summary']}",
                 "END:VEVENT"
             ])
